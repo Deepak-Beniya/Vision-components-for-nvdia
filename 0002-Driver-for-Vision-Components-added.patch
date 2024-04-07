@@ -1,0 +1,575 @@
+From 12623df100b62309c1aa713381f76fe4b6b98348 Mon Sep 17 00:00:00 2001
+From: Deepak <deepakbeniya@gmail.com>
+Date: Mon, 25 Mar 2024 20:25:52 +0530
+Subject: [PATCH] Driver for Vision Components added
+
+---
+ arch/arm64/configs/defconfig                  |   1 +
+ arch/arm64/configs/tegra_android_defconfig    |   1 +
+ nvidia/drivers/media/i2c/Kconfig              |  10 ++
+ nvidia/drivers/media/i2c/Makefile             |   1 +
+ .../platform/tegra/camera/camera_common.c     |  20 +++
+ .../platform/tegra/camera/csi/csi4_fops.c     |   4 +
+ .../platform/tegra/camera/sensor_common.c     |  16 +-
+ .../platform/tegra/camera/tegracam_ctrls.c    | 153 ++++++++++++++++--
+ .../media/platform/tegra/camera/vi/vi4_fops.c |   2 +-
+ .../platform/tegra/camera/vi/vi4_formats.h    |   8 +
+ .../media/platform/tegra/camera/vi/vi5_fops.c |  27 ++--
+ .../platform/tegra/camera/vi/vi5_formats.h    |  10 ++
+ nvidia/include/media/camera_common.h          |   4 +
+ nvidia/include/media/tegra-v4l2-camera.h      |   4 +
+ .../kernel-dts/cvb/tegra234-p3509-a02.dtsi    |  12 +-
+ .../tegra234-p3767-0000-p3768-0000-a0.dts     |   2 +
+ 16 files changed, 243 insertions(+), 32 deletions(-)
+
+diff --git a/arch/arm64/configs/defconfig b/arch/arm64/configs/defconfig
+index ce9f3e0a7432..4fbed66047ed 100644
+--- a/arch/arm64/configs/defconfig
++++ b/arch/arm64/configs/defconfig
+@@ -892,6 +892,7 @@ CONFIG_NV_VIDEO_IMX318=m
+ CONFIG_NV_VIDEO_LC898212=m
+ CONFIG_NV_VIDEO_OV5693=m
+ CONFIG_NV_VIDEO_OV9281=m
++CONFIG_NV_VIDEO_VC_MIPI=y
+ CONFIG_NV_VIDEO_OV10823=m
+ CONFIG_NV_VIDEO_OV23850=m
+ CONFIG_I2C_IOEXPANDER_PCA9570=m
+diff --git a/arch/arm64/configs/tegra_android_defconfig b/arch/arm64/configs/tegra_android_defconfig
+index 2a3e287c814f..3b5e3d25baf5 100644
+--- a/arch/arm64/configs/tegra_android_defconfig
++++ b/arch/arm64/configs/tegra_android_defconfig
+@@ -892,6 +892,7 @@ CONFIG_NV_VIDEO_IMX318=m
+ CONFIG_NV_VIDEO_LC898212=m
+ CONFIG_NV_VIDEO_OV5693=m
+ CONFIG_NV_VIDEO_OV9281=m
++CONFIG_NV_VIDEO_VC_MIPI=y
+ CONFIG_NV_VIDEO_OV10823=m
+ CONFIG_NV_VIDEO_OV23850=m
+ CONFIG_I2C_IOEXPANDER_PCA9570=m
+diff --git a/nvidia/drivers/media/i2c/Kconfig b/nvidia/drivers/media/i2c/Kconfig
+index 5ec3c683ce32..dbc4fc473dc7 100644
+--- a/nvidia/drivers/media/i2c/Kconfig
++++ b/nvidia/drivers/media/i2c/Kconfig
+@@ -99,6 +99,16 @@ config NV_VIDEO_OV9281
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called ov9281.
+ 
++config NV_VIDEO_VC_MIPI
++	tristate "Vision Components MIPI CSI-2 camera sensor support"
++	depends on I2C && VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API
++	help
++	  This is a Video4Linux2 sensor driver for the Vision Components
++	  MIPI CSI-2 camera sensor, for use with the tegra isp.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called vc_mipi.
++
+ config NV_VIDEO_OV10823
+ 	tristate "OmniVision OV10823 camera sensor support"
+ 	depends on I2C && VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API
+diff --git a/nvidia/drivers/media/i2c/Makefile b/nvidia/drivers/media/i2c/Makefile
+index c4708d8c77a4..1165bcf8e5df 100644
+--- a/nvidia/drivers/media/i2c/Makefile
++++ b/nvidia/drivers/media/i2c/Makefile
+@@ -13,6 +13,7 @@ obj-$(CONFIG_NV_VIDEO_IMX318) += nv_imx318.o
+ obj-$(CONFIG_NV_VIDEO_LC898212) += nv_lc898212.o
+ obj-$(CONFIG_NV_VIDEO_OV5693) += nv_ov5693.o
+ obj-$(CONFIG_NV_VIDEO_OV9281) += nv_ov9281.o
++obj-$(CONFIG_NV_VIDEO_VC_MIPI) += vc_mipi_camera.o vc_mipi_core.o vc_mipi_modules.o
+ obj-$(CONFIG_NV_VIDEO_OV10823) += nv_ov10823.o
+ obj-$(CONFIG_NV_VIDEO_OV23850) += nv_ov23850.o
+ obj-$(CONFIG_I2C_IOEXPANDER_PCA9570) += pca9570.o
+diff --git a/nvidia/drivers/media/platform/tegra/camera/camera_common.c b/nvidia/drivers/media/platform/tegra/camera/camera_common.c
+index 2b0b341b044b..c1b5059eac73 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/camera_common.c
++++ b/nvidia/drivers/media/platform/tegra/camera/camera_common.c
+@@ -131,6 +131,26 @@ static const struct camera_common_colorfmt camera_common_color_fmts[] = {
+ 		V4L2_COLORSPACE_SRGB,
+ 		V4L2_PIX_FMT_VYUY,
+ 	},
++	{
++		MEDIA_BUS_FMT_Y8_1X8,
++		V4L2_COLORSPACE_RAW,
++		V4L2_PIX_FMT_GREY,
++	},
++	{
++		MEDIA_BUS_FMT_Y10_1X10,
++		V4L2_COLORSPACE_RAW,
++		V4L2_PIX_FMT_Y10,
++	},
++	{
++		MEDIA_BUS_FMT_Y12_1X12,
++		V4L2_COLORSPACE_RAW,
++		V4L2_PIX_FMT_Y12,
++	},
++	{
++		MEDIA_BUS_FMT_Y14_1X14,
++		V4L2_COLORSPACE_RAW,
++		V4L2_PIX_FMT_Y14,
++	},
+ 	/*
+ 	 * The below two formats are not supported by VI4,
+ 	 * keep them at the last to ensure they get discarded
+diff --git a/nvidia/drivers/media/platform/tegra/camera/csi/csi4_fops.c b/nvidia/drivers/media/platform/tegra/camera/csi/csi4_fops.c
+index 1647ff467465..92306744f05e 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/csi/csi4_fops.c
++++ b/nvidia/drivers/media/platform/tegra/camera/csi/csi4_fops.c
+@@ -91,6 +91,10 @@ static void csi4_stream_init(struct tegra_csi_channel *chan, int csi_port)
+ 	csi4_stream_write(chan, csi_port, ERROR_STATUS2VI_MASK, 0x0);
+ 	csi4_stream_write(chan, csi_port, INTR_MASK, 0x0);
+ 	csi4_stream_write(chan, csi_port, ERR_INTR_MASK, 0x0);
++	csi4_stream_write(chan, csi_port, INTR_MASK, PH_ECC_MULTI_BIT_ERR | PD_CRC_ERR_VC0 | PH_ECC_SINGLE_BIT_ERR_VC0);
++	csi4_stream_write(chan, csi_port, ERR_INTR_MASK, PH_ECC_MULTI_BIT_ERR | PD_CRC_ERR_VC0 | PH_ECC_SINGLE_BIT_ERR_VC0);
++	csi4_stream_write(chan, csi_port, ERROR_STATUS2VI_MASK, CFG_ERR_STATUS2VI_MASK_VC0 | CFG_ERR_STATUS2VI_MASK_VC1 |
++				CFG_ERR_STATUS2VI_MASK_VC2 | CFG_ERR_STATUS2VI_MASK_VC3);
+ }
+ 
+ static void csi4_stream_config(struct tegra_csi_channel *chan, int port_idx)
+diff --git a/nvidia/drivers/media/platform/tegra/camera/sensor_common.c b/nvidia/drivers/media/platform/tegra/camera/sensor_common.c
+index d4e6d9d9bc0f..f02c8cd3ae30 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/sensor_common.c
++++ b/nvidia/drivers/media/platform/tegra/camera/sensor_common.c
+@@ -273,6 +273,18 @@ static int extract_pixel_format(
+ 		*format = V4L2_PIX_FMT_UYVY;
+ 	else if (strncmp(pixel_t, "yuv_vyuy16", size) == 0)
+ 		*format = V4L2_PIX_FMT_VYUY;
++ 	else if (strncmp(pixel_t, "yuv_vyuy16", size) == 0)
++ 		*format = V4L2_PIX_FMT_VYUY;
++	else if (strncmp(pixel_t, "gray", size) == 0)
++		*format = V4L2_PIX_FMT_GREY;
++	else if (strncmp(pixel_t, "y10", size) == 0)
++		*format = V4L2_PIX_FMT_Y10;
++	else if (strncmp(pixel_t, "y12", size) == 0)
++		*format = V4L2_PIX_FMT_Y12;
++        else if (strncmp(pixel_t, "y14", size) == 0)
++		*format = V4L2_PIX_FMT_Y14;
++	else if (strncmp(pixel_t, "bayer_rggb8", size) == 0)
++		*format = V4L2_PIX_FMT_SRGGB8;
+ 	else {
+ 		pr_err("%s: Need to extend format%s\n", __func__, pixel_t);
+ 		return -EINVAL;
+@@ -292,7 +304,7 @@ static int sensor_common_parse_image_props(
+ 	char pix_format[24];
+ 	u32 value = 0;
+ 
+-###################### Patch applied from VC-MIPI Modules #######################
++//###################### Patch applied from VC-MIPI Modules #######################
+ 
+ 	err = read_property_u32(node, "active_l",
+ 		&image->left);
+@@ -308,7 +320,7 @@ static int sensor_common_parse_image_props(
+ 		goto fail;
+ 	}
+ 
+-#####################  End ###################################################
++//#####################  End ###################################################
+ 
+ 	err = read_property_u32(node, "active_w",
+ 		&image->width);
+diff --git a/nvidia/drivers/media/platform/tegra/camera/tegracam_ctrls.c b/nvidia/drivers/media/platform/tegra/camera/tegracam_ctrls.c
+index c5cff21e08c3..a25772accd25 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/tegracam_ctrls.c
++++ b/nvidia/drivers/media/platform/tegra/camera/tegracam_ctrls.c
+@@ -182,6 +182,49 @@ static struct v4l2_ctrl_config ctrl_cfg_list[] = {
+ 		.max = STEREO_EEPROM_SIZE,
+ 		.step = 2,
+ 	},
++
++	{
++		.ops = &tegracam_ctrl_ops,
++		.id = TEGRA_CAMERA_CID_TRIGGER_MODE,
++		.name = "Trigger Mode",
++		.type = V4L2_CTRL_TYPE_INTEGER,
++		.flags = 0,
++		.min = 0,
++		.max = 7,
++		.step = 1,
++	},
++	{
++		.ops = &tegracam_ctrl_ops,
++		.id = TEGRA_CAMERA_CID_IO_MODE,
++		.name = "IO Mode",
++		.type = V4L2_CTRL_TYPE_INTEGER,
++		.flags = 0,
++		.min = 0,
++		.max = 5,
++		.step = 1,
++	},
++	{
++		.ops = &tegracam_ctrl_ops,
++		.id = TEGRA_CAMERA_CID_BLACK_LEVEL,
++		.name = "Black Level",
++		.type = V4L2_CTRL_TYPE_INTEGER,
++		.flags = 0,
++		.min = 0,
++		.max = 100000,
++		.def = 0,
++		.step = 1,
++	},
++	{
++		.ops = &tegracam_ctrl_ops,
++		.id = TEGRA_CAMERA_CID_SINGLE_TRIGGER,
++		.name = "Single Trigger",
++		.type = V4L2_CTRL_TYPE_BUTTON,
++		.flags = 0,
++		.min = 0,
++		.max = 1,
++		.def = 0,
++		.step = 1,
++	},
+ 	{
+ 		.ops = &tegracam_ctrl_ops,
+ 		.id = TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE,
+@@ -333,6 +376,20 @@ static int tegracam_set_ctrls(struct tegracam_ctrl_handler *handler,
+ 
+ 	/* For controls that require sensor to be on */
+ 	switch (ctrl->id) {
++
++	case TEGRA_CAMERA_CID_TRIGGER_MODE:
++		err = ops->set_trigger_mode(tc_dev, *ctrl->p_new.p_s64);
++		break;
++	case TEGRA_CAMERA_CID_IO_MODE:
++		err = ops->set_io_mode(tc_dev, *ctrl->p_new.p_s64);
++		break;
++	case TEGRA_CAMERA_CID_BLACK_LEVEL:
++		err = ops->set_black_level(tc_dev, *ctrl->p_new.p_s64);
++		break;
++	case TEGRA_CAMERA_CID_SINGLE_TRIGGER:
++		err = ops->set_single_trigger(tc_dev, ctrl->val);
++		break;	
++
+ 	case TEGRA_CAMERA_CID_GAIN:
+ 		if (*ctrl->p_new.p_s64 == ctrlprops->min_gain_val - 1)
+ 			return 0;
+@@ -352,10 +409,10 @@ static int tegracam_set_ctrls(struct tegracam_ctrl_handler *handler,
+ 	case TEGRA_CAMERA_CID_GROUP_HOLD:
+ 		err = ops->set_group_hold(tc_dev, ctrl->val);
+ 		break;
+-	case TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE:
+-		err = ops->set_alternating_exposure(tc_dev,
+-			(struct alternating_exposure_cfg *)ctrl->p_new.p);
+-		break;
++//	case TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE:
++//		err = ops->set_alternating_exposure(tc_dev,
++//			(struct alternating_exposure_cfg *)ctrl->p_new.p);
++//		break;
+ 	default:
+ 		pr_err("%s: unknown ctrl id.\n", __func__);
+ 		return -EINVAL;
+@@ -743,6 +800,36 @@ static int tegracam_check_ctrl_ops(
+ 	/* Find missing sensor controls */
+ 	for (i = 0; i < ops->numctrls; i++) {
+ 		switch (cids[i]) {
++
++		case TEGRA_CAMERA_CID_TRIGGER_MODE:
++			if (ops->set_trigger_mode == NULL)
++				dev_err(dev,
++					"Missing TEGRA_CAMERA_CID_TRIGGER_MODE implementation\n");
++			if (ops->set_trigger_mode != NULL)
++				sensor_ops++;
++			break;
++		case TEGRA_CAMERA_CID_IO_MODE:
++			if (ops->set_io_mode == NULL)
++				dev_err(dev,
++					"Missing TEGRA_CAMERA_CID_IO_MODE implementation\n");
++			if (ops->set_io_mode != NULL)
++				sensor_ops++;
++			break;
++		case TEGRA_CAMERA_CID_BLACK_LEVEL:
++			if (ops->set_black_level == NULL)
++				dev_err(dev,
++					"Missing TEGRA_CAMERA_CID_BLACK_LEVEL implementation\n");
++			if (ops->set_black_level != NULL)
++				sensor_ops++;
++			break;
++		case TEGRA_CAMERA_CID_SINGLE_TRIGGER:
++			if (ops->set_single_trigger == NULL)
++				dev_err(dev,
++					"Missing TEGRA_CAMERA_CID_SINGLE_TRIGGER implementation\n");
++			if (ops->set_single_trigger != NULL)
++				sensor_ops++;
++			break;
++
+ 		case TEGRA_CAMERA_CID_GAIN:
+ 			if (ops->set_gain == NULL && ops->set_gain_ex == NULL)
+ 				dev_err(dev,
+@@ -815,16 +902,16 @@ static int tegracam_check_ctrl_ops(
+ 			else
+ 				compound_ops++;
+ 			break;
+-		case TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE:
+-			if (tegracam_get_compound_ctrl_size(
+-				TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE, ops) == 0)
+-				dev_err(dev, "TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE control size unspecified\n");
+-			else if (ops->set_alternating_exposure == NULL)
+-				dev_err(dev,
+-					"Missing control implementation for TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE");
+-			else
+-				compound_ops++;
+-			break;
++//		case TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE:
++//			if (tegracam_get_compound_ctrl_size(
++//				TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE, ops) == 0)
++//				dev_err(dev, "TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE control size unspecified\n");
++//			else if (ops->set_alternating_exposure == NULL)
++//				dev_err(dev,
++//					"Missing control implementation for TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE");
++//			else
++//				compound_ops++;
++//			break;
+ 
+ 		/* The below controls are handled by framework */
+ 		case TEGRA_CAMERA_CID_SENSOR_MODE_ID:
+@@ -919,6 +1006,44 @@ static int tegracam_check_ctrl_cids(struct tegracam_ctrl_handler *handler)
+ 	int errors_found = 0;
+ 
+ 	/* Find missing sensor control IDs */
++
++	if (ops->set_trigger_mode != NULL) {
++		if (!find_matching_cid(ops->ctrl_cid_list,
++			ops->numctrls,
++			TEGRA_CAMERA_CID_TRIGGER_MODE)) {
++			dev_err(dev, "Missing TEGRA_CAMERA_CID_TRIGGER_MODE registration\n");
++			errors_found++;
++		}
++	}
++
++	if (ops->set_io_mode != NULL) {
++		if (!find_matching_cid(ops->ctrl_cid_list,
++			ops->numctrls,
++			TEGRA_CAMERA_CID_IO_MODE)) {
++			dev_err(dev, "Missing TEGRA_CAMERA_CID_IO_MODE registration\n");
++			errors_found++;
++		}
++	}
++
++	if (ops->set_black_level != NULL) {
++		if (!find_matching_cid(ops->ctrl_cid_list,
++			ops->numctrls,
++			TEGRA_CAMERA_CID_BLACK_LEVEL)) {
++			dev_err(dev, "Missing TEGRA_CAMERA_CID_BLACK_LEVEL registration\n");
++			errors_found++;
++		}
++	}
++
++	if (ops->set_single_trigger != NULL) {
++		if (!find_matching_cid(ops->ctrl_cid_list,
++			ops->numctrls,
++			TEGRA_CAMERA_CID_SINGLE_TRIGGER)) {
++			dev_err(dev, "Missing TEGRA_CAMERA_CID_SINGLE_TRIGGER registration\n");
++			errors_found++;
++		}
++	}
++
++
+ 	if (ops->set_gain != NULL || ops->set_gain_ex != NULL) {
+ 		if (!find_matching_cid(ops->ctrl_cid_list,
+ 			ops->numctrls,
+diff --git a/nvidia/drivers/media/platform/tegra/camera/vi/vi4_fops.c b/nvidia/drivers/media/platform/tegra/camera/vi/vi4_fops.c
+index 9bae5563c5ab..75a0fa48a184 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/vi/vi4_fops.c
++++ b/nvidia/drivers/media/platform/tegra/camera/vi/vi4_fops.c
+@@ -1106,7 +1106,7 @@ static int vi4_channel_start_streaming(struct vb2_queue *vq, u32 count)
+ 	}
+ 
+ 	chan->sequence = 0;
+-	chan->timeout = msecs_to_jiffies(200);
++	chan->timeout = msecs_to_jiffies(5000);
+ 	if (!chan->low_latency)
+ 		tegra_channel_init_ring_buffer(chan);
+ 
+diff --git a/nvidia/drivers/media/platform/tegra/camera/vi/vi4_formats.h b/nvidia/drivers/media/platform/tegra/camera/vi/vi4_formats.h
+index de33c42fbf79..2ca8b198816e 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/vi/vi4_formats.h
++++ b/nvidia/drivers/media/platform/tegra/camera/vi/vi4_formats.h
+@@ -95,6 +95,8 @@ static const struct tegra_video_format vi4_video_formats[] = {
+ 				RAW8, SGBRG8, "GBGB.. RGRG.."),
+ 	TEGRA_VIDEO_FORMAT(RAW8, 8, SBGGR8_1X8, 1, 1, T_L8,
+ 				RAW8, SBGGR8, "BGBG.. GRGR.."),
++	TEGRA_VIDEO_FORMAT(RAW8, 8, Y8_1X8, 1, 1, T_L8,
++				RAW8, GREY, "GRAY8"),
+ 
+ 	/* RAW 10 */
+ 	TEGRA_VIDEO_FORMAT(RAW10, 10, SRGGB10_1X10, 2, 1, T_R16_I,
+@@ -115,6 +117,12 @@ static const struct tegra_video_format vi4_video_formats[] = {
+ 				RAW12, SGBRG12, "GBGB.. RGRG.."),
+ 	TEGRA_VIDEO_FORMAT(RAW12, 12, SBGGR12_1X12, 2, 1, T_R16_I,
+ 				RAW12, SBGGR12, "BGBG.. GRGR.."),
++	TEGRA_VIDEO_FORMAT(RAW12, 12, Y12_1X12, 2, 1, T_R16_I,
++				RAW12, Y12, "GRAY12"),
++
++	/* RAW 14 */
++	TEGRA_VIDEO_FORMAT(RAW14, 14, Y14_1X14, 2, 1, T_R16_I,
++				RAW14, Y14, "GRAY14"),
+ 
+ 	/* RGB888 */
+ 	TEGRA_VIDEO_FORMAT(RGB888, 24, RGB888_1X24, 4, 1, T_A8R8G8B8,
+diff --git a/nvidia/drivers/media/platform/tegra/camera/vi/vi5_fops.c b/nvidia/drivers/media/platform/tegra/camera/vi/vi5_fops.c
+index b54833d3f887..90f13df6a090 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/vi/vi5_fops.c
++++ b/nvidia/drivers/media/platform/tegra/camera/vi/vi5_fops.c
+@@ -39,7 +39,7 @@
+ #define VI_CHANNEL_DEV "/dev/capture-vi-channel"
+ #define VI_CHAN_PATH_MAX 40
+ 
+-#define CAPTURE_TIMEOUT_MS	2500
++#define CAPTURE_TIMEOUT_MS	5000
+ 
+ static const struct vi_capture_setup default_setup = {
+ 	.channel_flags = 0
+@@ -525,17 +525,17 @@ static void vi5_capture_dequeue(struct tegra_channel *chan,
+ 				dev_err(vi->dev, "uncorr_err: flags %d, err_data %d\n",
+ 					descr->status.flags, descr->status.err_data);
+ 			} else {
+-				dev_warn(vi->dev,
+-					"corr_err: discarding frame %d, flags: %d, "
+-					"err_data %d\n",
+-					descr->status.frame_id, descr->status.flags,
+-					descr->status.err_data);
+-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
+-					buf->vb2_state = VB2_BUF_STATE_REQUEUEING;
+-#else
+-					buf->vb2_state = VB2_BUF_STATE_ERROR;
+-#endif
+-			goto done;
++// 				dev_warn(vi->dev,
++// 					"corr_err: discarding frame %d, flags: %d, "
++// 					"err_data %d\n",
++// 					descr->status.frame_id, descr->status.flags,
++// 					descr->status.err_data);
++// #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
++// 					buf->vb2_state = VB2_BUF_STATE_REQUEUEING;
++// #else
++// 					buf->vb2_state = VB2_BUF_STATE_ERROR;
++// #endif
++// 			goto done;
+ 			}
+ 		} else if (!vi_port) {
+ 			gang_prev_frame_id = descr->status.frame_id;
+@@ -580,7 +580,7 @@ static void vi5_capture_dequeue(struct tegra_channel *chan,
+ 	trace_tegra_channel_capture_frame("eof", &ts);
+ #endif
+ 
+-done:
++//done:
+ 	goto rel_buf;
+ 
+ uncorr_err:
+@@ -592,6 +592,7 @@ static void vi5_capture_dequeue(struct tegra_channel *chan,
+ 
+ rel_buf:
+ 	vi5_release_buffer(chan, buf);
++
+ }
+ 
+ static int vi5_channel_error_recover(struct tegra_channel *chan,
+diff --git a/nvidia/drivers/media/platform/tegra/camera/vi/vi5_formats.h b/nvidia/drivers/media/platform/tegra/camera/vi/vi5_formats.h
+index 7ee3a62236f3..da6360048f20 100644
+--- a/nvidia/drivers/media/platform/tegra/camera/vi/vi5_formats.h
++++ b/nvidia/drivers/media/platform/tegra/camera/vi/vi5_formats.h
+@@ -95,6 +95,8 @@ static const struct tegra_video_format vi5_video_formats[] = {
+ 				RAW8, SGBRG8, "GBGB.. RGRG.."),
+ 	TEGRA_VIDEO_FORMAT(RAW8, 8, SBGGR8_1X8, 1, 1, T_R8,
+ 				RAW8, SBGGR8, "BGBG.. GRGR.."),
++	TEGRA_VIDEO_FORMAT(RAW8, 8, Y8_1X8, 1, 1, T_R8,
++				RAW8, GREY, "GRAY8"),
+ 
+ 	/* RAW 10 */
+ 	TEGRA_VIDEO_FORMAT(RAW10, 10, SRGGB10_1X10, 2, 1, T_R16,
+@@ -105,6 +107,8 @@ static const struct tegra_video_format vi5_video_formats[] = {
+ 				RAW10, SGBRG10, "GBGB.. RGRG.."),
+ 	TEGRA_VIDEO_FORMAT(RAW10, 10, SBGGR10_1X10, 2, 1, T_R16,
+ 				RAW10, SBGGR10, "BGBG.. GRGR.."),
++	TEGRA_VIDEO_FORMAT(RAW10, 10, Y10_1X10, 2, 1, T_R16,
++				RAW10, Y10, "GRAY10"),
+ 
+ 	/* RAW 12 */
+ 	TEGRA_VIDEO_FORMAT(RAW12, 12, SRGGB12_1X12, 2, 1, T_R16,
+@@ -115,6 +119,12 @@ static const struct tegra_video_format vi5_video_formats[] = {
+ 				RAW12, SGBRG12, "GBGB.. RGRG.."),
+ 	TEGRA_VIDEO_FORMAT(RAW12, 12, SBGGR12_1X12, 2, 1, T_R16,
+ 				RAW12, SBGGR12, "BGBG.. GRGR.."),
++	TEGRA_VIDEO_FORMAT(RAW12, 12, Y12_1X12, 2, 1, T_R16,
++				RAW12, Y12, "GRAY12"),
++
++	/* RAW 14 */
++	TEGRA_VIDEO_FORMAT(RAW14, 14, Y14_1X14, 2, 1, T_R16,
++				RAW14, Y14, "GRAY14"),
+ 
+ 	/* RGB888 */
+ 	TEGRA_VIDEO_FORMAT(RGB888, 24, RGB888_1X24, 4, 1, T_A8R8G8B8,
+diff --git a/nvidia/include/media/camera_common.h b/nvidia/include/media/camera_common.h
+index d4e00ad25afe..d0079e28dcda 100644
+--- a/nvidia/include/media/camera_common.h
++++ b/nvidia/include/media/camera_common.h
+@@ -195,6 +195,10 @@ struct tegracam_ctrl_ops {
+ 	u32 compound_ctrl_size[TEGRA_CAM_MAX_COMPOUND_CONTROLS];
+ 	const u32 *ctrl_cid_list;
+ 	bool is_blob_supported;
++	int (*set_trigger_mode)(struct tegracam_device *tc_dev, s64 val);
++	int (*set_io_mode)(struct tegracam_device *tc_dev, s64 val);
++	int (*set_black_level)(struct tegracam_device *tc_dev, s64 val);
++	int (*set_single_trigger)(struct tegracam_device *tc_dev, bool val);
+ 	int (*set_gain)(struct tegracam_device *tc_dev, s64 val);
+ 	int (*set_exposure)(struct tegracam_device *tc_dev, s64 val);
+ 	int (*set_exposure_short)(struct tegracam_device *tc_dev, s64 val);
+diff --git a/nvidia/include/media/tegra-v4l2-camera.h b/nvidia/include/media/tegra-v4l2-camera.h
+index 49aed5bb2587..abb69130759f 100644
+--- a/nvidia/include/media/tegra-v4l2-camera.h
++++ b/nvidia/include/media/tegra-v4l2-camera.h
+@@ -38,6 +38,10 @@
+ #define TEGRA_CAMERA_CID_FRAME_RATE		(TEGRA_CAMERA_CID_BASE+11)
+ #define TEGRA_CAMERA_CID_EXPOSURE_SHORT		(TEGRA_CAMERA_CID_BASE+12)
+ #define TEGRA_CAMERA_CID_STEREO_EEPROM		(TEGRA_CAMERA_CID_BASE+13)
++#define TEGRA_CAMERA_CID_TRIGGER_MODE		(TEGRA_CAMERA_CID_BASE+14)
++#define TEGRA_CAMERA_CID_IO_MODE		(TEGRA_CAMERA_CID_BASE+15)
++#define TEGRA_CAMERA_CID_BLACK_LEVEL		(TEGRA_CAMERA_CID_BASE+16)
++#define TEGRA_CAMERA_CID_SINGLE_TRIGGER		(TEGRA_CAMERA_CID_BASE+17)
+ #define TEGRA_CAMERA_CID_ALTERNATING_EXPOSURE	(TEGRA_CAMERA_CID_BASE+14)
+ 
+ #define TEGRA_CAMERA_CID_SENSOR_CONFIG		(TEGRA_CAMERA_CID_BASE+50)
+diff --git a/nvidia/platform/t23x/p3768/kernel-dts/cvb/tegra234-p3509-a02.dtsi b/nvidia/platform/t23x/p3768/kernel-dts/cvb/tegra234-p3509-a02.dtsi
+index 2fa67db63b5b..6483efb80581 100644
+--- a/nvidia/platform/t23x/p3768/kernel-dts/cvb/tegra234-p3509-a02.dtsi
++++ b/nvidia/platform/t23x/p3768/kernel-dts/cvb/tegra234-p3509-a02.dtsi
+@@ -10,14 +10,22 @@
+  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+  * more details.
+  */
++
++#define VC_MIPI
++
+ #include <dt-bindings/gpio/tegra234-gpio.h>
+ #include "dt-bindings/input/input.h"
+ #include "tegra234-p3509-a02-pwm-fan.dtsi"
+ #include "tegra234-p3509-a02-pcie.dtsi"
+ #include "tegra234-p3509-a02-fixed-regulator.dtsi"
+ #include "tegra234-p3509-audio.dtsi"
+-#include "tegra234-p3768-camera-rbpcv3-imx477.dtsi"
+-#include "tegra234-p3768-camera-rbpcv2-imx219.dtsi"
++
++#ifdef VC_MIPI
++	#include "tegra234-camera-vc-mipi-cam.dtsi"
++#else
++        #include "tegra234-p3768-camera-rbpcv3-imx477.dtsi"
++        #include "tegra234-p3768-camera-rbpcv2-imx219.dtsi"
++#endif
+ 
+ / {
+ 	gpio-keys {
+diff --git a/nvidia/platform/t23x/p3768/kernel-dts/tegra234-p3767-0000-p3768-0000-a0.dts b/nvidia/platform/t23x/p3768/kernel-dts/tegra234-p3767-0000-p3768-0000-a0.dts
+index 0992d1bd2fb7..0c906497aaba 100644
+--- a/nvidia/platform/t23x/p3768/kernel-dts/tegra234-p3767-0000-p3768-0000-a0.dts
++++ b/nvidia/platform/t23x/p3768/kernel-dts/tegra234-p3767-0000-p3768-0000-a0.dts
+@@ -23,6 +23,8 @@
+ #include "cvm/tegra234-p3767-0000.dtsi"
+ #include "cvb/tegra234-p3768-0000-a0.dtsi"
+ 
++#include "cvb/tegra234-camera-vc-mipi-cam.dtsi"
++
+ / {
+ 	nvidia,dtsfilename = __FILE__;
+ 	nvidia,dtbbuildtime = __DATE__, __TIME__;
+-- 
+2.25.1
+
